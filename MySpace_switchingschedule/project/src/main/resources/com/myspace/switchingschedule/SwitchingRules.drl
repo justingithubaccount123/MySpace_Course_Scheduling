@@ -1,0 +1,215 @@
+package com.myspace.switchingschedule;
+
+global com.myspace.switchingschedule.SwitchingSchedule schedule;
+
+rule "Define Protection Devices"
+    when
+        $ta: TraceAsset ( asset.group != Asset.PROTECTIONDEVICE, asset.type in ("Recloser", "AutoRecloser") )
+        //could also test based on ActionName
+    then
+        System.out.println("Set group to Protection Device for type " + $ta.asset.getType()); 
+		$ta.getAsset().setGroup(Asset.PROTECTIONDEVICE);
+		update($ta);
+end
+
+rule "Define Isolation Points"
+    when
+        $ta: TraceAsset ( asset.group != Asset.ISOLATIONPOINT, asset.type in ("LV_ISOL", "PTS", "PTF") )
+        // could also test based on ActionName
+    then
+        System.out.println("Set group to Isolation Point for type " + $ta.asset.getType()); 
+		$ta.getAsset().setGroup(Asset.ISOLATIONPOINT);
+		update($ta);
+end
+
+/*
+ Start - Header Steps
+*/
+rule "Application Initial Steps"
+    when
+        $app : NetworkAccessApplication()
+    then
+		schedule.setAppId($app.getId());
+		schedule.addInstruction(SwitchingInstruction.HEADER, $app.getAreaCEOTActionName(), $app.getAreaCEOTActionVerb() + " " + $app.getAreaCEOTNumber(), null);
+end
+
+/*
+ Protection Steps
+*/
+rule "Enabled via R/C"
+    when
+        $app : NetworkAccessApplication( type == ApplicationType.LLW)
+        $pd: TraceAsset ( asset.group == Asset.PROTECTIONDEVICE, state == StateAction.DISABLED )
+    then
+        schedule.addInstruction(SwitchingInstruction.PROTECTION, $pd.getAsset(), StateAction.ENABLED, null);
+        $pd.setPrevState($pd.getState());
+        $pd.setState(StateAction.ENABLED);
+        update ($pd);
+end
+
+/*
+ Safety Devices e.g. Earth
+*/
+rule "LLW Confirmation"
+    when
+        $app : NetworkAccessApplication(type == ApplicationType.LLW)
+    then
+        schedule.addInstruction(SwitchingInstruction.SAFETY, StateAction.COMMENT, "Confirmed OK for LLW to proceed."); //Confirmed OK for LLW to proceed
+end
+
+rule "ARS Confirmation"
+    when
+        $app : NetworkAccessApplication(type == ApplicationType.ARS)
+    then
+        schedule.addInstruction(SwitchingInstruction.SAFETY, StateAction.COMMENT, "Confirm AR Suppressed"); //Confirmed OK for LLW to proceed
+end
+
+rule "At interuption time"
+    when
+        $app : NetworkAccessApplication( type == ApplicationType.LV)
+    then
+        schedule.addInstruction(SwitchingInstruction.PROTECTION, StateAction.COMMENT, "At interruption time:");
+end
+
+rule "LV Open Nearest Up Stream Points"
+    when
+        $app : NetworkAccessApplication(type == ApplicationType.LV )
+        $ip: TraceAsset ( asset.group == Asset.ISOLATIONPOINT, state == StateAction.CLOSED, direction == "Up", seq==1) // Isolate at the first available point
+    then
+        schedule.addInstruction(SwitchingInstruction.ISOLATION, $ip.getAsset(), StateAction.OPENEDTAGGED ,  null);
+        $ip.setPrevState($ip.getState());
+        $ip.setState( StateAction.OPENEDTAGGED);
+        $ip.setTagged(true);
+        update ($ip);
+end
+
+rule "TEST & Attach Bonders - LV"
+    when
+        $app : NetworkAccessApplication(type == ApplicationType.LV)
+    then
+        schedule.addInstruction(SwitchingInstruction.SAFETY, "acd_hv_test_attach_lv_bonder", "LV Bonders Attached" , null);
+end
+
+/*
+ Special Steps
+*/
+
+rule "Issue New EAP"
+    when
+        $app : NetworkAccessApplication(type == ApplicationType.LV)
+    then
+        schedule.addInstruction(SwitchingInstruction.SPECIAL, StateAction.COMMENT, "Issue New EAP");
+end
+
+/*
+ Restoration Header Steps
+*/
+
+rule "Application Restoration"
+    when
+        $app : NetworkAccessApplication(type == ApplicationType.LV) || NetworkAccessApplication(type == ApplicationType.LLW)
+    then
+        schedule.addInstruction(SwitchingInstruction.RESTORATIONHEADER, StateAction.COMMENT,  "RESTORATION.");
+end
+
+/*
+ ReverseSpecial Steps
+*/
+
+rule "Cancel EAP"
+    when
+        $app : NetworkAccessApplication(type == ApplicationType.LV)
+    then
+        schedule.addInstruction(SwitchingInstruction.REVERSESPECIAL, StateAction.COMMENT, "Cancel EAP");
+end
+
+/*
+ Safety Devices e.g. Earth
+ */
+rule "Remove Bonders - LV"
+    when
+        $app : NetworkAccessApplication(type == ApplicationType.LV)
+    then
+        schedule.addInstruction(SwitchingInstruction.REMOVESAFETY, "acd_hv_remove_lv_bonder", "LV Bonders Removed", null);
+end
+
+rule "LV Restore Closed Point - Up Stream"
+    when
+        $app : NetworkAccessApplication(type == ApplicationType.LV)
+        $ip: TraceAsset ( asset.group == Asset.ISOLATIONPOINT, prevState == StateAction.CLOSED, direction == "Up", $ipTagged : tagged)
+    then
+        schedule.addInstruction(SwitchingInstruction.RESTOREPROTECTION, $ip.getAsset(), StateAction.CLOSED, null);
+
+end
+
+rule "LLW Completes"
+    when
+        $app : NetworkAccessApplication(type == ApplicationType.LLW)
+    then
+        schedule.addInstruction(SwitchingInstruction.REVERSESPECIAL, StateAction.COMMENT, "Live Line Work Completed");
+end
+
+rule "ARS Completes"
+    when
+        $app : NetworkAccessApplication(type == ApplicationType.ARS)
+    then
+        schedule.addInstruction(SwitchingInstruction.REVERSESPECIAL, StateAction.COMMENT, "Confirm Clear of Suppression");
+end
+
+/*
+ Restoration Protection Steps
+*/
+rule "Disabled via R/C"
+    when
+        $app : NetworkAccessApplication(type == ApplicationType.LLW)
+        $pd: TraceAsset ( asset.group == Asset.PROTECTIONDEVICE, prevState == StateAction.DISABLED )
+    then
+        schedule.addInstruction(SwitchingInstruction.RESTOREPROTECTION, $pd.getAsset(), StateAction.DISABLED, null);
+end
+
+/*
+ Final Steps
+*/
+
+rule "Application Final Steps - Not HV"
+    when
+        $app : NetworkAccessApplication(type != ApplicationType.HV)
+    then
+        schedule.addInstruction(SwitchingInstruction.FINAL, StateAction.WORK_COMPLETE, null);
+end
+
+rule "Application Final Steps - HV"
+    when
+        $app : NetworkAccessApplication(type == ApplicationType.HV)
+    then
+        schedule.addInstruction(SwitchingInstruction.FINAL, StateAction.WORK_COMPLETE, "And Advise the Following Information - Interruption time - Electrical Access Permit Number - Issue time of Electrical Access Permit - Name of Recipient in Charge - Cancellation time of Electrical Access Permit - Restoration time");
+end
+
+
+rule "HV - LV Restore Closed Point - Up Stream"
+    when
+        $app : NetworkAccessApplication(type == ApplicationType.HV)
+        $ip: TraceAsset () // may need to change
+        
+        // $app : NetworkAccessApplication(type == ApplicationType.LV) || NetworkAccessApplication(type == ApplicationType.LLW)
+    then
+        schedule.addInstruction(SwitchingInstruction.RESTOREPROTECTION, "hello", "hello1");
+
+end
+
+
+
+rule "Application Final Steps2"
+    when
+        $app : NetworkAccessApplication()
+    then
+        schedule.addInstruction(SwitchingInstruction.FINAL, StateAction.WORK_COMPLETE, null);
+end
+
+
+
+
+
+
+
+
